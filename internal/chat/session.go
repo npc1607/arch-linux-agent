@@ -50,7 +50,9 @@ func NewChatSession(ctx context.Context, cfg ChatConfig) *ChatSession {
 	}
 
 	// 创建 Agent
-	ag, err := agent.NewAgent(config)
+	// ag, err := agent.NewAgent(config)
+	// 启用懒加载Tools
+	ag, err := agent.NewAgentWithLazyLoading(config, true)
 	if err != nil {
 		logger.Error("创建 Agent 失败", logger.Err(err))
 		return &ChatSession{

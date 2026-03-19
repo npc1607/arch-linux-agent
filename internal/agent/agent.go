@@ -14,15 +14,16 @@ import (
 
 // Agent AI Agent
 type Agent struct {
-	config      *config.Config
-	llmClient   *llm.Client
-	tools       *ToolRegistry
-	planner     *Planner
-	messages    []llm.Message
-	usePlanner  bool  // 是否使用规划模式
+	config       *config.Config
+	llmClient    *llm.Client
+	tools        *ToolRegistry
+	lazyRegistry *LazyToolRegistry // 懒加载工具注册表（可选）
+	planner      *Planner
+	messages     []llm.Message
+	usePlanner   bool // 是否使用规划模式
 }
 
-// NewAgent 创建 Agent
+// NewAgent 创建 Agent（传统方式，预加载所有工具）
 func NewAgent(cfg *config.Config) (*Agent, error) {
 	// 创建 LLM 客户端
 	llmClient, err := llm.NewClient(&cfg.LLM)
@@ -30,7 +31,7 @@ func NewAgent(cfg *config.Config) (*Agent, error) {
 		return nil, fmt.Errorf("创建 LLM 客户端失败: %w", err)
 	}
 
-	// 创建工具注册表
+	// 创建工具注册表（预加载所有工具）
 	tools := NewToolRegistry(cfg)
 
 	// 创建规划器
@@ -42,7 +43,50 @@ func NewAgent(cfg *config.Config) (*Agent, error) {
 		tools:      tools,
 		planner:    planner,
 		messages:   make([]llm.Message, 0),
-		usePlanner: false,  // 默认使用 Function Calling
+		usePlanner: false, // 默认使用 Function Calling
+	}, nil
+}
+
+// NewAgentWithLazyLoading 创建支持懒加载的 Agent
+// 懒加载模式下，工具不会在启动时全部加载，而是根据用户消息按需加载
+// 这样可以大幅减少启动时间和 token 消耗
+func NewAgentWithLazyLoading(cfg *config.Config, enableLazy bool) (*Agent, error) {
+	// 创建 LLM 客户端
+	llmClient, err := llm.NewClient(&cfg.LLM)
+	if err != nil {
+		return nil, fmt.Errorf("创建 LLM 客户端失败: %w", err)
+	}
+
+	// 创建基础工具注册表（只包含核心工具）
+	tools := NewToolRegistry(cfg)
+
+	var lazyRegistry *LazyToolRegistry
+	if enableLazy {
+		// 创建懒加载注册表
+		lazyRegistry = NewLazyToolRegistry(tools)
+
+		// 获取命令执行器（从基础工具注册表中获取）
+		exec := tools.GetExecutor()
+
+		// 设置懒加载工具组
+		SetupRealMCPServers(lazyRegistry, cfg, exec)
+
+		logger.Info("懒加载工具注册表已创建",
+			logger.Bool("enabled", true),
+		)
+	}
+
+	// 创建规划器
+	planner := NewPlanner(llmClient, tools)
+
+	return &Agent{
+		config:       cfg,
+		llmClient:    llmClient,
+		tools:        tools,
+		lazyRegistry: lazyRegistry,
+		planner:      planner,
+		messages:     make([]llm.Message, 0),
+		usePlanner:   false,
 	}, nil
 }
 
@@ -53,6 +97,33 @@ func (a *Agent) Process(ctx context.Context, userInput string, streamCallback fu
 		logger.Bool("use_planner", a.usePlanner),
 		logger.Int("history_len", len(a.messages)),
 	)
+
+	// 检查是否需要加载懒加载工具
+	if a.lazyRegistry != nil {
+		logger.Info("检查懒加载工具", logger.String("input", userInput))
+		loadedGroups, err := a.lazyRegistry.CheckAndLoad(ctx, userInput)
+		if IsToolLoadPending(err) {
+			// 需要用户确认
+			groupName, _ := GetGroupNameFromError(err)
+			logger.Info("检测到需要加载工具组，自动确认",
+				logger.String("group", groupName),
+			)
+
+			// 自动确认并加载
+			_, err = a.lazyRegistry.LoadGroup(ctx, groupName, true)
+			if err != nil {
+				logger.Error("加载工具组失败", logger.Err(err))
+				return "", fmt.Errorf("加载工具组 %s 失败: %w", groupName, err)
+			}
+			logger.Info("工具组加载成功", logger.Strings("groups", loadedGroups))
+		} else if err != nil {
+			logger.Error("检查工具加载失败", logger.Err(err))
+		} else if len(loadedGroups) > 0 {
+			logger.Info("自动加载了工具组", logger.Strings("groups", loadedGroups))
+		} else {
+			logger.Info("无需加载新工具组")
+		}
+	}
 
 	// 添加用户消息
 	a.messages = append(a.messages, llm.Message{
@@ -74,6 +145,30 @@ func (a *Agent) ProcessStream(ctx context.Context, userInput string, streamCallb
 		logger.Bool("use_planner", a.usePlanner),
 	)
 
+	// 检查是否需要加载懒加载工具
+	if a.lazyRegistry != nil {
+		loadedGroups, err := a.lazyRegistry.CheckAndLoad(ctx, userInput)
+		if IsToolLoadPending(err) {
+			// 需要用户确认
+			groupName, _ := GetGroupNameFromError(err)
+			logger.Info("检测到需要加载工具组，自动确认",
+				logger.String("group", groupName),
+			)
+
+			// 自动确认并加载
+			_, err = a.lazyRegistry.LoadGroup(ctx, groupName, true)
+			if err != nil {
+				logger.Error("加载工具组失败", logger.Err(err))
+				return fmt.Errorf("加载工具组 %s 失败: %w", groupName, err)
+			}
+			logger.Info("工具组加载成功", logger.Strings("groups", loadedGroups))
+		} else if err != nil {
+			logger.Error("检查工具加载失败", logger.Err(err))
+		} else if len(loadedGroups) > 0 {
+			logger.Info("自动加载了工具组", logger.Strings("groups", loadedGroups))
+		}
+	}
+
 	// 添加用户消息
 	a.messages = append(a.messages, llm.Message{
 		Role:    "user",
@@ -89,7 +184,17 @@ func (a *Agent) ProcessStream(ctx context.Context, userInput string, streamCallb
 	messages := a.buildMessages()
 
 	// 获取可用工具（转换为 OpenAI 格式）
-	llmTools := a.tools.GetOpenAITools()
+	var llmTools []openai.Tool
+	if a.lazyRegistry != nil {
+		// 使用懒加载注册表获取工具（包含已加载的懒加载工具）
+		llmTools = a.lazyRegistry.GetLoadedTools()
+		logger.Info("使用懒加载注册表获取工具", logger.Int("count", len(llmTools)))
+	} else {
+		// 使用传统方式获取工具
+		llmTools = a.tools.GetOpenAITools()
+		logger.Info("使用传统方式获取工具", logger.Int("count", len(llmTools)))
+	}
+
 	llmFunctions := a.convertToolsToFunctions(llmTools)
 
 	// 第一步：先用非流式检测是否需要工具调用
@@ -163,14 +268,40 @@ func (a *Agent) processWithFunctionCalling(ctx context.Context, userInput string
 	messages := a.buildMessages()
 
 	// 获取可用工具（转换为 OpenAI 格式）
-	llmTools := a.tools.GetOpenAITools()
+	var llmTools []openai.Tool
+	if a.lazyRegistry != nil {
+		// 使用懒加载注册表获取工具（包含已加载的懒加载工具）
+		llmTools = a.lazyRegistry.GetLoadedTools()
+		logger.Info("使用懒加载注册表获取工具", logger.Int("count", len(llmTools)))
+	} else {
+		// 使用传统方式获取工具
+		llmTools = a.tools.GetOpenAITools()
+		logger.Info("使用传统方式获取工具", logger.Int("count", len(llmTools)))
+	}
+
 	llmFunctions := a.convertToolsToFunctions(llmTools)
+
+	logger.Info("可用工具列表",
+		logger.Int("total", len(llmFunctions)),
+	)
+
+	// 打印工具名称用于调试
+	for i, fn := range llmFunctions {
+		if i < 10 { // 只打印前10个
+			logger.Debug("工具", logger.String("name", fn.Name))
+		}
+	}
 
 	// 调用 LLM
 	response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), llmFunctions)
 	if err != nil {
 		return "", err
 	}
+
+	logger.Info("LLM 响应",
+		logger.Bool("has_content", response.Content != ""),
+		logger.Int("tool_calls", len(response.ToolCalls)),
+	)
 
 	// 如果有工具调用，执行工具
 	if len(response.ToolCalls) > 0 {
@@ -334,7 +465,7 @@ func (a *Agent) summarizeToolResults(ctx context.Context, toolResults []string, 
 
 	messages := a.buildMessages()
 	messages = append(messages, llm.Message{
-		Role: "user",
+		Role:    "user",
 		Content: prompt,
 	})
 

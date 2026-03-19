@@ -394,6 +394,11 @@ func (r *ToolRegistry) Get(name string) (*Tool, bool) {
 	return tool, ok
 }
 
+// GetExecutor 获取命令执行器（供懒加载使用）
+func (r *ToolRegistry) GetExecutor() *tools.Executor {
+	return r.exec
+}
+
 // List 列出所有工具
 func (r *ToolRegistry) List() []*Tool {
 	tools := make([]*Tool, 0, len(r.tools))
