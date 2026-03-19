@@ -3,11 +3,20 @@ package chat
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 
-	"github.com/sashabaranov/go-openai"
+	"github.com/npc1607/arch-linux-agent/internal/agent"
+	"github.com/npc1607/arch-linux-agent/internal/config"
+	"github.com/npc1607/arch-linux-agent/internal/llm"
+	"github.com/npc1607/arch-linux-agent/pkg/logger"
 )
+
+// ChatSession 聊天会话
+type ChatSession struct {
+	agent        *agent.Agent
+	config       ChatConfig
+	systemPrompt string
+}
 
 // ChatConfig 聊天配置
 type ChatConfig struct {
@@ -19,50 +28,44 @@ type ChatConfig struct {
 	SafeMode     bool
 	MaxTokens    int
 	Temperature  float64
-	SystemPrompt string  // 系统提示词
-}
-
-// ChatSession 聊天会话
-type ChatSession struct {
-	client     *openai.Client
-	config     ChatConfig
-	messages   []openai.ChatCompletionMessage
-	systemPrompt string
+	SystemPrompt string
 }
 
 // NewChatSession 创建新的聊天会话
-func NewChatSession(ctx context.Context, config ChatConfig) *ChatSession {
-	clientConfig := openai.DefaultConfig(config.APIKey)
-	if config.BaseURL != "" {
-		clientConfig.BaseURL = config.BaseURL
+func NewChatSession(ctx context.Context, cfg ChatConfig) *ChatSession {
+	// 创建配置
+	config := &config.Config{
+		LLM: config.LLMConfig{
+			APIKey:      cfg.APIKey,
+			Model:       cfg.Model,
+			BaseURL:     cfg.BaseURL,
+			MaxTokens:   cfg.MaxTokens,
+			Temperature: cfg.Temperature,
+		},
+		Security: config.SecurityConfig{
+			SafeMode: cfg.SafeMode,
+		},
+	}
+
+	// 创建 Agent
+	ag, err := agent.NewAgent(config)
+	if err != nil {
+		logger.Error("创建 Agent 失败", logger.Err(err))
+		return &ChatSession{
+			config: cfg,
+		}
 	}
 
 	return &ChatSession{
-		client:   openai.NewClientWithConfig(clientConfig),
-		config:   config,
-		messages: make([]openai.ChatCompletionMessage, 0),
-		systemPrompt: buildSystemPrompt(config.SafeMode),
+		agent:        ag,
+		config:       cfg,
+		systemPrompt: buildSystemPrompt(cfg.SafeMode),
 	}
 }
 
 // NewChatSessionWithConfig 创建新的聊天会话（使用自定义系统提示词）
 func NewChatSessionWithConfig(ctx context.Context, config ChatConfig) *ChatSession {
-	clientConfig := openai.DefaultConfig(config.APIKey)
-	if config.BaseURL != "" {
-		clientConfig.BaseURL = config.BaseURL
-	}
-
-	systemPrompt := config.SystemPrompt
-	if systemPrompt == "" {
-		systemPrompt = buildSystemPrompt(config.SafeMode)
-	}
-
-	return &ChatSession{
-		client:   openai.NewClientWithConfig(clientConfig),
-		config:   config,
-		messages: make([]openai.ChatCompletionMessage, 0),
-		systemPrompt: systemPrompt,
-	}
+	return NewChatSession(ctx, config)
 }
 
 // buildSystemPrompt 构建系统提示词
@@ -91,7 +94,7 @@ func buildSystemPrompt(safeMode bool) string {
 	if safeMode {
 		prompt += `
 【安全模式已启用】
-当前处于只读模式，不会执行任何修改系统的操作。
+当前处于只读模式，只执行查询类操作。
 只能执行查询类命令，如:
 - pacman -Ss (搜索包)
 - systemctl status (查看状态)
@@ -105,115 +108,81 @@ func buildSystemPrompt(safeMode bool) string {
 
 // Process 处理用户输入
 func (s *ChatSession) Process(ctx context.Context, userInput string) error {
-	// 添加用户消息
-	s.messages = append(s.messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: userInput,
-	})
-
-	// 准备请求消息（包含系统提示）
-	allMessages := append([]openai.ChatCompletionMessage{
-		{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: s.systemPrompt,
-		},
-	}, s.messages...)
-
-	if s.config.Stream {
-		return s.processStream(ctx, allMessages)
-	}
-	return s.processNormal(ctx, allMessages)
-}
-
-// processStream 流式处理
-func (s *ChatSession) processStream(ctx context.Context, messages []openai.ChatCompletionMessage) error {
-	fmt.Print("🤖 Agent> ")
-
-	request := openai.ChatCompletionRequest{
-		Model:       s.config.Model,
-		Messages:    messages,
-		MaxTokens:   s.config.MaxTokens,
-		Temperature: float32(s.config.Temperature),
-		Stream:      true,
-	}
-
-	stream, err := s.client.CreateChatCompletionStream(ctx, request)
+	// 使用 Agent 处理
+	response, err := s.agent.Process(ctx, userInput, nil)
 	if err != nil {
-		return fmt.Errorf("创建流式请求失败: %w", err)
-	}
-	defer stream.Close()
-
-	var fullContent strings.Builder
-
-	for {
-		response, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return fmt.Errorf("接收流式响应失败: %w", err)
-		}
-
-		if len(response.Choices) == 0 {
-			continue
-		}
-
-		content := response.Choices[0].Delta.Content
-		if content != "" {
-			fmt.Print(content)
-			fullContent.WriteString(content)
-		}
+		return err
 	}
 
-	// 保存助手回复
-	s.messages = append(s.messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleAssistant,
-		Content: fullContent.String(),
-	})
+	// 输出响应
+	fmt.Printf("🤖 Agent> %s\n", response)
 
 	return nil
 }
 
-// processNormal 普通处理
-func (s *ChatSession) processNormal(ctx context.Context, messages []openai.ChatCompletionMessage) error {
-	request := openai.ChatCompletionRequest{
-		Model:       s.config.Model,
-		Messages:    messages,
-		MaxTokens:   s.config.MaxTokens,
-		Temperature: float32(s.config.Temperature),
-		Stream:      false,
-	}
+// ProcessStream 处理用户输入（流式输出）
+func (s *ChatSession) ProcessStream(ctx context.Context, userInput string) error {
+	// 输出提示
+	fmt.Print("🤖 Agent> ")
 
-	response, err := s.client.CreateChatCompletion(ctx, request)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	if len(response.Choices) == 0 {
-		return fmt.Errorf("未收到响应")
-	}
-
-	content := response.Choices[0].Message.Content
-
-	fmt.Printf("🤖 Agent> %s\n", content)
-
-	// 保存助手回复
-	s.messages = append(s.messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleAssistant,
-		Content: content,
+	// 使用 Agent 流式处理
+	fullResponse := strings.Builder{}
+	err := s.agent.ProcessStream(ctx, userInput, func(chunk string) {
+		// 实时输出每个 token
+		fmt.Print(chunk)
+		fullResponse.WriteString(chunk)
 	})
+
+	if err != nil {
+		fmt.Println() // 换行
+		return err
+	}
+
+	// 确保以换行结束
+	if fullResponse.Len() > 0 {
+		lastChar := fullResponse.String()[len(fullResponse.String())-1]
+		if lastChar != '\n' {
+			fmt.Println()
+		}
+	}
 
 	return nil
 }
 
 // ClearHistory 清空对话历史
 func (s *ChatSession) ClearHistory() {
-	s.messages = make([]openai.ChatCompletionMessage, 0)
+	s.agent.ClearHistory()
 }
 
 // GetHistory 获取对话历史
-func (s *ChatSession) GetHistory() []openai.ChatCompletionMessage {
-	return s.messages
+func (s *ChatSession) GetHistory() []llm.Message {
+	history := s.agent.GetHistory()
+	if history == nil {
+		return []llm.Message{}
+	}
+	return history
+}
+
+// GetHistoryFormatted 获取格式化的对话历史（用于显示）
+func (s *ChatSession) GetHistoryFormatted() []string {
+	history := s.agent.GetHistory()
+	result := make([]string, len(history))
+
+	for i, msg := range history {
+		role := msg.Role
+		roleDisplay := role
+		switch role {
+		case "user":
+			roleDisplay = "👤 You"
+		case "assistant":
+			roleDisplay = "🤖 Agent"
+		case "tool":
+			roleDisplay = "🔧 Tool"
+		}
+		result[i] = fmt.Sprintf("%s> %s", roleDisplay, msg.Content)
+	}
+
+	return result
 }
 
 // UpdateSystemPrompt 更新系统提示

@@ -141,6 +141,24 @@ func runChat(cmd *cobra.Command, args []string) {
 				continue
 			}
 
+			// Handle history command
+			if input == "history" || input == "hist" {
+				printHistory(session)
+				continue
+			}
+
+			// Handle stream toggle command
+			if input == "stream" {
+				stream = !stream
+				mode := "禁用"
+				if stream {
+					mode = "启用"
+				}
+				logger.Debug("流式输出模式", logger.Bool("enabled", stream))
+				fmt.Fprintf(os.Stderr, "流式输出已%s\n", mode)
+				continue
+			}
+
 			// Handle help command
 			if input == "help" || input == "?" {
 				printChatHelp()
@@ -155,7 +173,29 @@ func runChat(cmd *cobra.Command, args []string) {
 
 			// Process user input
 			startTime := logger.Now()
-			if err := session.Process(ctx, input); err != nil {
+			var processErr error
+			if stream {
+				// 使用流式输出
+				processErr = session.ProcessStream(ctx, input)
+			} else {
+				// 使用普通输出
+				processErr = session.Process(ctx, input)
+			}
+
+			if processErr != nil {
+				logger.Error("处理用户输入失败",
+					logger.Err(processErr),
+					logger.String("input", input),
+				)
+				fmt.Fprintf(os.Stderr, "错误: %v\n", processErr)
+			} else {
+				logger.Debug("处理完成",
+					logger.String("duration", logger.Now().Sub(startTime).String()),
+				)
+				messageCount++
+			}
+
+			if err != nil {
 				logger.Error("处理用户输入失败",
 					logger.Err(err),
 					logger.String("input", input),
@@ -241,6 +281,8 @@ func printChatHelp() {
 可用命令:
   help, ?     显示此帮助信息
   clear, cls  清空对话历史
+  history     查看对话历史
+  stream      切换流式输出模式
   exit, quit  退出程序
 
 示例对话:
@@ -249,4 +291,18 @@ func printChatHelp() {
   "查看 CPU 使用率"
   "为什么 nginx 启动失败？"
 `)
+}
+
+func printHistory(session *chat.ChatSession) {
+	history := session.GetHistoryFormatted()
+	if len(history) == 0 {
+		fmt.Fprintln(os.Stderr, "暂无对话历史")
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "\n=== 对话历史 ===")
+	for i, msg := range history {
+		fmt.Fprintf(os.Stderr, "%d. %s\n", i+1, msg)
+	}
+	fmt.Fprintln(os.Stderr, "================\n")
 }

@@ -14,11 +14,12 @@ import (
 
 // Agent AI Agent
 type Agent struct {
-	config     *config.Config
-	llmClient  *llm.Client
-	tools      *ToolRegistry
-	planner    *Planner
-	messages   []llm.Message
+	config      *config.Config
+	llmClient   *llm.Client
+	tools       *ToolRegistry
+	planner     *Planner
+	messages    []llm.Message
+	usePlanner  bool  // 是否使用规划模式
 }
 
 // NewAgent 创建 Agent
@@ -36,20 +37,115 @@ func NewAgent(cfg *config.Config) (*Agent, error) {
 	planner := NewPlanner(llmClient, tools)
 
 	return &Agent{
-		config:    cfg,
-		llmClient: llmClient,
-		tools:     tools,
-		planner:   planner,
-		messages:  make([]llm.Message, 0),
+		config:     cfg,
+		llmClient:  llmClient,
+		tools:      tools,
+		planner:    planner,
+		messages:   make([]llm.Message, 0),
+		usePlanner: false,  // 默认使用 Function Calling
 	}, nil
 }
 
-// Process 处理用户输入（带规划）
+// Process 处理用户输入（支持 Function Calling 和规划模式）
 func (a *Agent) Process(ctx context.Context, userInput string, streamCallback func(string)) (string, error) {
 	logger.Info("Agent 处理用户输入",
 		logger.String("input", userInput),
+		logger.Bool("use_planner", a.usePlanner),
 		logger.Int("history_len", len(a.messages)),
 	)
+
+	// 添加用户消息
+	a.messages = append(a.messages, llm.Message{
+		Role:    "user",
+		Content: userInput,
+	})
+
+	if a.usePlanner {
+		return a.processWithPlanner(ctx, userInput, streamCallback)
+	}
+
+	return a.processWithFunctionCalling(ctx, userInput, streamCallback)
+}
+
+// ProcessStream 处理用户输入（流式输出）
+func (a *Agent) ProcessStream(ctx context.Context, userInput string, streamCallback func(string)) error {
+	logger.Info("Agent 流式处理用户输入",
+		logger.String("input", userInput),
+		logger.Bool("use_planner", a.usePlanner),
+	)
+
+	// 添加用户消息
+	a.messages = append(a.messages, llm.Message{
+		Role:    "user",
+		Content: userInput,
+	})
+
+	// 构建消息列表
+	messages := a.buildMessages()
+
+	// 获取可用工具（转换为 OpenAI 格式）
+	llmTools := a.tools.GetOpenAITools()
+	llmFunctions := a.convertToolsToFunctions(llmTools)
+
+	// 调用 LLM 流式输出
+	var fullContent strings.Builder
+	err := a.llmClient.ChatStream(ctx, a.convertMessagesToLLM(messages), llmFunctions, func(chunk string) {
+		fullContent.WriteString(chunk)
+		if streamCallback != nil {
+			streamCallback(chunk)
+		}
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// 保存助手回复
+	a.messages = append(a.messages, llm.Message{
+		Role:    "assistant",
+		Content: fullContent.String(),
+	})
+
+	return nil
+}
+
+// processWithFunctionCalling 使用 Function Calling 模式
+func (a *Agent) processWithFunctionCalling(ctx context.Context, userInput string, streamCallback func(string)) (string, error) {
+	logger.Info("使用 Function Calling 模式")
+
+	// 构建消息列表
+	messages := a.buildMessages()
+
+	// 获取可用工具（转换为 OpenAI 格式）
+	llmTools := a.tools.GetOpenAITools()
+	llmFunctions := a.convertToolsToFunctions(llmTools)
+
+	// 调用 LLM
+	response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), llmFunctions)
+	if err != nil {
+		return "", err
+	}
+
+	// 如果有工具调用，执行工具
+	if len(response.ToolCalls) > 0 {
+		return a.handleToolCalls(ctx, response.ToolCalls, streamCallback)
+	}
+
+	// 没有工具调用，直接返回 LLM 响应
+	finalResponse := response.Content
+
+	// 保存助手回复
+	a.messages = append(a.messages, llm.Message{
+		Role:    "assistant",
+		Content: finalResponse,
+	})
+
+	return finalResponse, nil
+}
+
+// processWithPlanner 使用规划模式
+func (a *Agent) processWithPlanner(ctx context.Context, userInput string, streamCallback func(string)) (string, error) {
+	logger.Info("使用规划模式")
 
 	// 1. 任务规划
 	plan, err := a.planner.Plan(ctx, userInput)
@@ -63,15 +159,15 @@ func (a *Agent) Process(ctx context.Context, userInput string, streamCallback fu
 		logger.String("safety_level", plan.SafetyLevel),
 	)
 
-	// 2. 添加用户消息
-	a.messages = append(a.messages, llm.Message{
-		Role:    "user",
-		Content: userInput,
-	})
-
-	// 3. 执行计划
+	// 2. 执行计划
 	var results []string
 	for _, step := range plan.Steps {
+		// 检查是否需要确认
+		if step.Confirm && a.config.Security.ConfirmBeforeAction {
+			// TODO: 添加用户确认逻辑
+			logger.Info("需要用户确认", logger.Int("step", step.ID))
+		}
+
 		result, err := a.planner.ExecuteStep(ctx, step)
 		if err != nil {
 			// 执行失败，记录错误
@@ -83,10 +179,10 @@ func (a *Agent) Process(ctx context.Context, userInput string, streamCallback fu
 		}
 	}
 
-	// 4. 构建响应
-	response := a.buildResponse(ctx, userInput, plan, results, streamCallback)
+	// 3. 构建响应
+	response := a.buildResponseFromPlan(ctx, userInput, plan, results)
 
-	// 5. 保存助手回复
+	// 4. 保存助手回复
 	a.messages = append(a.messages, llm.Message{
 		Role:    "assistant",
 		Content: response,
@@ -95,40 +191,34 @@ func (a *Agent) Process(ctx context.Context, userInput string, streamCallback fu
 	return response, nil
 }
 
-// buildResponse 构建响应
-func (a *Agent) buildResponse(ctx context.Context, userInput string, plan *Plan, results []string, streamCallback func(string)) string {
-	// 如果只有一个步骤且是查询类，直接返回结果
-	if len(plan.Steps) == 1 && plan.Intent == IntentQuery {
-		return results[0]
+// buildMessages 构建消息列表（包含系统提示和历史）
+func (a *Agent) buildMessages() []llm.Message {
+	// 构建系统提示
+	systemPrompt := llm.BuildDefaultSystemPrompt(a.config.Security.SafeMode)
+
+	// 添加工具描述
+	tools := a.tools.ListSafe()
+	if len(tools) > 0 {
+		systemPrompt += "\n\n可用工具：\n"
+		for _, tool := range tools {
+			systemPrompt += fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description)
+		}
 	}
-
-	// 多步骤或复杂任务，让 LLM 总结
-	prompt := fmt.Sprintf(`用户请求: %s
-
-执行计划:
-- 意图: %s
-- 步骤数: %d
-
-执行结果:
-%s
-
-请总结执行结果并给出建议。`, userInput, plan.Intent, len(plan.Steps), strings.Join(results, "\n\n"))
 
 	messages := []llm.Message{
-		{Role: "system", Content: llm.BuildDefaultSystemPrompt(a.config.Security.SafeMode)},
-		{Role: "user", Content: prompt},
+		{
+			Role:    "system",
+			Content: systemPrompt,
+		},
 	}
 
-	response, err := a.llmClient.Chat(ctx, messages, nil)
-	if err != nil {
-		// 如果 LLM 总结失败，返回原始结果
-		return strings.Join(results, "\n\n")
-	}
+	// 添加历史消息
+	messages = append(messages, a.messages...)
 
-	return response.Content
+	return messages
 }
 
-// handleToolCalls 处理工具调用（保留用于未来可能的直接工具调用）
+// handleToolCalls 处理工具调用（Function Calling）
 func (a *Agent) handleToolCalls(ctx context.Context, toolCalls []llm.ToolCall, streamCallback func(string)) (string, error) {
 	logger.Info("处理工具调用", logger.Int("count", len(toolCalls)))
 
@@ -185,9 +275,69 @@ func (a *Agent) handleToolCalls(ctx context.Context, toolCalls []llm.ToolCall, s
 		toolResults = append(toolResults, result)
 	}
 
-	// 让 LLM 总结工具结果（使用简化的方式）
-	allResults := strings.Join(toolResults, "\n\n")
-	return allResults, nil
+	// 让 LLM 总结工具结果
+	return a.summarizeToolResults(ctx, toolResults)
+}
+
+// summarizeToolResults 让 LLM 总结工具执行结果
+func (a *Agent) summarizeToolResults(ctx context.Context, toolResults []string) (string, error) {
+	prompt := fmt.Sprintf(`工具执行结果：
+%s
+
+请总结以上结果并给出回复。`, strings.Join(toolResults, "\n\n"))
+
+	messages := a.buildMessages()
+	messages = append(messages, llm.Message{
+		Role: "user",
+		Content: prompt,
+	})
+
+	response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), nil)
+	if err != nil {
+		// 如果 LLM 总结失败，返回原始结果
+		return strings.Join(toolResults, "\n\n"), nil
+	}
+
+	// 保存最终回复
+	a.messages = append(a.messages, llm.Message{
+		Role:    "assistant",
+		Content: response.Content,
+	})
+
+	return response.Content, nil
+}
+
+// buildResponseFromPlan 从计划结果构建响应
+func (a *Agent) buildResponseFromPlan(ctx context.Context, userInput string, plan *Plan, results []string) string {
+	// 如果只有一个步骤且是查询类，直接返回结果
+	if len(plan.Steps) == 1 && plan.Intent == IntentQuery {
+		return results[0]
+	}
+
+	// 多步骤或复杂任务，让 LLM 总结
+	prompt := fmt.Sprintf(`用户请求: %s
+
+执行计划:
+- 意图: %s
+- 步骤数: %d
+
+执行结果:
+%s
+
+请总结执行结果并给出建议。`, userInput, plan.Intent, len(plan.Steps), strings.Join(results, "\n\n"))
+
+	messages := []llm.Message{
+		{Role: "system", Content: llm.BuildDefaultSystemPrompt(a.config.Security.SafeMode)},
+		{Role: "user", Content: prompt},
+	}
+
+	response, err := a.llmClient.Chat(ctx, messages, nil)
+	if err != nil {
+		// 如果 LLM 总结失败，返回原始结果
+		return strings.Join(results, "\n\n")
+	}
+
+	return response.Content
 }
 
 // convertMessagesToLLM 转换消息格式
@@ -291,6 +441,12 @@ func (a *Agent) GetAvailableToolsForLLM() string {
 	}
 
 	return sb.String()
+}
+
+// SetPlannerMode 设置规划模式
+func (a *Agent) SetPlannerMode(enable bool) {
+	a.usePlanner = enable
+	logger.Info("规划模式", logger.Bool("enabled", enable))
 }
 
 // UpdateConfig 更新配置
