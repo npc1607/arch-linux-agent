@@ -17,15 +17,15 @@ type OpenAIEmbeddingClient struct {
 // NewOpenAIEmbeddingClient 创建 OpenAI Embedding 客户端
 func NewOpenAIEmbeddingClient(apiKey, model string) (*OpenAIEmbeddingClient, error) {
 	if model == "" {
-		model = openai.Embedding3Small
+		model = string(openai.SmallEmbedding3)
 	}
 
 	client := openai.NewClient(apiKey)
 
 	dim := 1536 // text-embedding-3-small 默认维度
-	if model == openai.Embedding3Large {
+	if model == string(openai.LargeEmbedding3) {
 		dim = 3072
-	} else if model == openai.EmbeddingAda002 {
+	} else if model == string(openai.SmallEmbedding3) {
 		dim = 1536
 	}
 
@@ -44,7 +44,7 @@ func (c *OpenAIEmbeddingClient) Embed(ctx context.Context, text string) ([]float
 
 	resp, err := c.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
 		Input: []string{text},
-		Model: c.model,
+		Model: openai.EmbeddingModel(c.model),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedding: %w", err)
@@ -66,7 +66,7 @@ func (c *OpenAIEmbeddingClient) EmbedBatch(ctx context.Context, texts []string) 
 	// OpenAI 支持批量处理
 	resp, err := c.client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
 		Input: texts,
-		Model: c.model,
+		Model: openai.EmbeddingModel(c.model),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embeddings: %w", err)

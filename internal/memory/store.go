@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 )
 
 // InMemoryStore 内存存储实现（用于开发和测试）
 type InMemoryStore struct {
-	mu      sync.RWMutex
+	mu       sync.RWMutex
 	memories map[string]*Memory
 }
 
@@ -46,8 +45,8 @@ func (s *InMemoryStore) Retrieve(ctx context.Context, embedding []float32, limit
 
 	// 计算相似度并排序
 	type ScoredMemory struct {
-		Memory  *Memory
-		Score   float64
+		Memory *Memory
+		Score  float64
 	}
 
 	scored := make([]ScoredMemory, 0, len(s.memories))
