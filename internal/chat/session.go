@@ -11,14 +11,15 @@ import (
 
 // ChatConfig 聊天配置
 type ChatConfig struct {
-	APIKey      string
-	Model       string
-	BaseURL     string
-	Stream      bool
-	Verbose     bool
-	SafeMode    bool
-	MaxTokens   int
-	Temperature float64
+	APIKey       string
+	Model        string
+	BaseURL      string
+	Stream       bool
+	Verbose      bool
+	SafeMode     bool
+	MaxTokens    int
+	Temperature  float64
+	SystemPrompt string  // 系统提示词
 }
 
 // ChatSession 聊天会话
@@ -41,6 +42,26 @@ func NewChatSession(ctx context.Context, config ChatConfig) *ChatSession {
 		config:   config,
 		messages: make([]openai.ChatCompletionMessage, 0),
 		systemPrompt: buildSystemPrompt(config.SafeMode),
+	}
+}
+
+// NewChatSessionWithConfig 创建新的聊天会话（使用自定义系统提示词）
+func NewChatSessionWithConfig(ctx context.Context, config ChatConfig) *ChatSession {
+	clientConfig := openai.DefaultConfig(config.APIKey)
+	if config.BaseURL != "" {
+		clientConfig.BaseURL = config.BaseURL
+	}
+
+	systemPrompt := config.SystemPrompt
+	if systemPrompt == "" {
+		systemPrompt = buildSystemPrompt(config.SafeMode)
+	}
+
+	return &ChatSession{
+		client:   openai.NewClientWithConfig(clientConfig),
+		config:   config,
+		messages: make([]openai.ChatCompletionMessage, 0),
+		systemPrompt: systemPrompt,
 	}
 }
 
