@@ -80,6 +80,11 @@ func (a *Agent) ProcessStream(ctx context.Context, userInput string, streamCallb
 		Content: userInput,
 	})
 
+	if a.usePlanner {
+		_, err := a.processWithPlanner(ctx, userInput, streamCallback)
+		return err
+	}
+
 	// 构建消息列表
 	messages := a.buildMessages()
 
@@ -87,9 +92,50 @@ func (a *Agent) ProcessStream(ctx context.Context, userInput string, streamCallb
 	llmTools := a.tools.GetOpenAITools()
 	llmFunctions := a.convertToolsToFunctions(llmTools)
 
-	// 调用 LLM 流式输出
+	// 第一步：先用非流式检测是否需要工具调用
+	response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), llmFunctions)
+	if err != nil {
+		return err
+	}
+
+	// 如果有工具调用，使用 Function Calling 模式处理
+	if len(response.ToolCalls) > 0 {
+		logger.Info("检测到工具调用，切换到 Function Calling 模式")
+		finalResponse, err := a.handleToolCalls(ctx, response.ToolCalls, streamCallback)
+		if err != nil {
+			return err
+		}
+
+		// 流式输出最终响应
+		if streamCallback != nil {
+			for _, ch := range finalResponse {
+				streamCallback(string(ch))
+			}
+		}
+		return nil
+	}
+
+	// 如果不需要工具，使用流式输出回复
+	logger.Info("无需工具调用，使用流式输出")
+	if response.Content != "" {
+		// 有初始响应，流式输出
+		if streamCallback != nil {
+			for _, ch := range response.Content {
+				streamCallback(string(ch))
+			}
+		}
+
+		// 保存助手回复
+		a.messages = append(a.messages, llm.Message{
+			Role:    "assistant",
+			Content: response.Content,
+		})
+		return nil
+	}
+
+	// 如果 LLM 没有返回任何内容，调用流式接口
 	var fullContent strings.Builder
-	err := a.llmClient.ChatStream(ctx, a.convertMessagesToLLM(messages), llmFunctions, func(chunk string) {
+	err = a.llmClient.ChatStream(ctx, a.convertMessagesToLLM(messages), nil, func(chunk string) {
 		fullContent.WriteString(chunk)
 		if streamCallback != nil {
 			streamCallback(chunk)
@@ -276,11 +322,11 @@ func (a *Agent) handleToolCalls(ctx context.Context, toolCalls []llm.ToolCall, s
 	}
 
 	// 让 LLM 总结工具结果
-	return a.summarizeToolResults(ctx, toolResults)
+	return a.summarizeToolResults(ctx, toolResults, streamCallback)
 }
 
 // summarizeToolResults 让 LLM 总结工具执行结果
-func (a *Agent) summarizeToolResults(ctx context.Context, toolResults []string) (string, error) {
+func (a *Agent) summarizeToolResults(ctx context.Context, toolResults []string, streamCallback func(string)) (string, error) {
 	prompt := fmt.Sprintf(`工具执行结果：
 %s
 
@@ -292,6 +338,33 @@ func (a *Agent) summarizeToolResults(ctx context.Context, toolResults []string) 
 		Content: prompt,
 	})
 
+	// 如果提供了流式回调，使用流式输出
+	if streamCallback != nil {
+		var fullContent strings.Builder
+		err := a.llmClient.ChatStream(ctx, a.convertMessagesToLLM(messages), nil, func(chunk string) {
+			fullContent.WriteString(chunk)
+			streamCallback(chunk)
+		})
+
+		if err != nil {
+			// 如果 LLM 总结失败，返回原始结果
+			result := strings.Join(toolResults, "\n\n")
+			for _, ch := range result {
+				streamCallback(string(ch))
+			}
+			return result, nil
+		}
+
+		// 保存最终回复
+		a.messages = append(a.messages, llm.Message{
+			Role:    "assistant",
+			Content: fullContent.String(),
+		})
+
+		return fullContent.String(), nil
+	}
+
+	// 非流式模式
 	response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), nil)
 	if err != nil {
 		// 如果 LLM 总结失败，返回原始结果

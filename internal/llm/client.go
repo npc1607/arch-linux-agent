@@ -173,6 +173,14 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, functions [
 	var fullContent strings.Builder
 
 	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("LLM 流式请求被取消")
+			return ctx.Err()
+		default:
+			// 继续接收数据
+		}
+
 		response, err := stream.Recv()
 		if err != nil {
 			if err == io.EOF {

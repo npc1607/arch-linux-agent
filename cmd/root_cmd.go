@@ -44,7 +44,7 @@ func init() {
 
 	// OpenAI API
 	rootCmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "OpenAI API Key (也可以通过环境变量 OPENAI_API_KEY 设置)")
-	rootCmd.PersistentFlags().StringVar(&model, "model", "gpt-4o", "OpenAI 模型 (gpt-4o, gpt-4-turbo, gpt-3.5-turbo)")
+	rootCmd.PersistentFlags().StringVar(&model, "model", "glm-4.7", "OpenAI 模型 (gpt-4o, gpt-4-turbo, gpt-3.5-turbo)")
 	rootCmd.PersistentFlags().StringVar(&baseURL, "base-url", "", "自定义 API Base URL")
 
 	// Behavior

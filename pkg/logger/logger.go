@@ -61,7 +61,8 @@ func Init(cfg *Config) error {
 	// 控制台输出
 	if cfg.Output == "stdout" || cfg.Output == "both" {
 		stdoutEncoder := zapcore.NewConsoleEncoder(encoderConfig)
-		stdoutCore := zapcore.NewCore(stdoutEncoder, zapcore.AddSync(os.Stdout), level)
+		// 注意：日志输出到 stderr，保留 stdout 用于程序输出
+		stdoutCore := zapcore.NewCore(stdoutEncoder, zapcore.AddSync(os.Stderr), level)
 		cores = append(cores, stdoutCore)
 	}
 

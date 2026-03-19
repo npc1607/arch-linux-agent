@@ -20,10 +20,10 @@ type Config struct {
 
 // LLMConfig LLM 配置
 type LLMConfig struct {
-	APIKey  string  `mapstructure:"api_key"`
-	Model   string  `mapstructure:"model"`
-	BaseURL string  `mapstructure:"base_url"`
-	MaxTokens int   `mapstructure:"max_tokens"`
+	APIKey      string  `mapstructure:"api_key"`
+	Model       string  `mapstructure:"model"`
+	BaseURL     string  `mapstructure:"base_url"`
+	MaxTokens   int     `mapstructure:"max_tokens"`
 	Temperature float64 `mapstructure:"temperature"`
 }
 
@@ -57,11 +57,11 @@ type CommandsConfig struct {
 
 // MemoryConfig 记忆配置
 type MemoryConfig struct {
-	Enabled          bool     `mapstructure:"enabled"`
-	TokenMaxHistory  int      `mapstructure:"token_max_history"`
-	LatentMaxMemories int     `mapstructure:"latent_max_memories"`
-	AutoSummary      bool     `mapstructure:"auto_summary"`
-	DecayInterval    int      `mapstructure:"decay_interval"` // 小时
+	Enabled           bool `mapstructure:"enabled"`
+	TokenMaxHistory   int  `mapstructure:"token_max_history"`
+	LatentMaxMemories int  `mapstructure:"latent_max_memories"`
+	AutoSummary       bool `mapstructure:"auto_summary"`
+	DecayInterval     int  `mapstructure:"decay_interval"` // 小时
 }
 
 // Load 加载配置
@@ -163,10 +163,11 @@ func (c *Config) Validate() error {
 
 	// 验证模型
 	validModels := map[string]bool{
-		"gpt-4o":       true,
-		"gpt-4-turbo":  true,
-		"gpt-4":        true,
+		"gpt-4o":        true,
+		"gpt-4-turbo":   true,
+		"gpt-4":         true,
 		"gpt-3.5-turbo": true,
+		"glm-4.7":       true,
 	}
 	if !validModels[c.LLM.Model] {
 		return fmt.Errorf("不支持的模型: %s", c.LLM.Model)
