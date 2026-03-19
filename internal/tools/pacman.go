@@ -162,8 +162,22 @@ func (p *PacmanTool) parseListResult(output string) []Package {
 func (p *PacmanTool) CheckUpdates(ctx context.Context) ([]Package, error) {
 	logger.Info("检查系统更新")
 
+	// 尝试同步数据库（需要root权限）
+	_, syncErr := p.exec.Run(ctx, p.cmdName, "-Sy")
+	if syncErr != nil {
+		logger.Warn("同步数据库失败（可能需要root权限），将使用现有数据库检查", logger.Err(syncErr))
+	}
+
+	// 检查更新
 	result, err := p.exec.Run(ctx, p.cmdName, "-Qu")
 	if err != nil {
+		// pacman -Qu 在没有更新时返回错误，但这是正常情况
+		// 检查是否是因为没有更新导致的
+		if result.ExitCode != 0 && result.Output == "" {
+			// 没有可用更新，返回空列表
+			logger.Info("检查完成", logger.Int("updates", 0))
+			return []Package{}, nil
+		}
 		return nil, fmt.Errorf("检查更新失败: %w", err)
 	}
 

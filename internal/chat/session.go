@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/npc1607/arch-linux-agent/internal/agent"
 	"github.com/npc1607/arch-linux-agent/internal/config"
 	"github.com/npc1607/arch-linux-agent/internal/llm"
 	"github.com/npc1607/arch-linux-agent/pkg/logger"
+	"github.com/npc1607/arch-linux-agent/pkg/thinking"
 )
 
 // ChatSession 聊天会话
@@ -122,16 +124,34 @@ func (s *ChatSession) Process(ctx context.Context, userInput string) error {
 
 // ProcessStream 处理用户输入（流式输出）
 func (s *ChatSession) ProcessStream(ctx context.Context, userInput string) error {
-	// 输出提示
-	fmt.Print("🤖 Agent> ")
+	// 创建thinking动画（500ms后才显示）
+	anim := thinking.NewSpinner("🤖 Agent")
+
+	anim.Start()
+
+	// 用于标记是否已收到第一个chunk
+	var hasContent int32
 
 	// 使用 Agent 流式处理
 	fullResponse := strings.Builder{}
 	err := s.agent.ProcessStream(ctx, userInput, func(chunk string) {
+		// 第一个chunk到达时停止动画
+		if atomic.CompareAndSwapInt32(&hasContent, 0, 1) {
+			anim.Stop()
+			// 输出提示
+			fmt.Print("🤖 Agent> ")
+		}
+
 		// 实时输出每个 token
 		fmt.Print(chunk)
 		fullResponse.WriteString(chunk)
 	})
+
+	// 如果没有收到任何内容，停止动画
+	if atomic.LoadInt32(&hasContent) == 0 {
+		anim.Stop()
+		fmt.Print("🤖 Agent> ")
+	}
 
 	if err != nil {
 		fmt.Println() // 换行

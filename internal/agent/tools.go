@@ -31,6 +31,7 @@ type ToolRegistry struct {
 	systemd *tools.SystemdTool
 	monitor *tools.MonitorTool
 	log     *tools.LogTool
+	weather *tools.WeatherTool
 }
 
 // NewToolRegistry 创建工具注册表
@@ -52,6 +53,7 @@ func NewToolRegistry(cfg *config.Config) *ToolRegistry {
 	registry.systemd = tools.NewSystemdTool(exec, "systemctl")
 	registry.monitor = tools.NewMonitorTool(exec)
 	registry.log = tools.NewLogTool(exec)
+	registry.weather = tools.NewWeatherTool()
 
 	// 注册所有工具
 	registry.registerAll()
@@ -357,6 +359,27 @@ func (r *ToolRegistry) registerAll() {
 		Safe:    true,
 	})
 
+	// 天气工具
+	r.Register(&Tool{
+		Name:        "weather_get",
+		Description: "获取天气信息",
+		Function: openai.FunctionDefinition{
+			Name:        "weather_get",
+			Description: "获取指定地点的当前天气和预报信息。不指定地点则根据IP自动定位",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"location": map[string]interface{}{
+						"type":        "string",
+						"description": "地点名称（城市名、拼音或英文，如：北京、Shanghai、Tokyo），留空则自动定位",
+					},
+				},
+			},
+		},
+		Handler: r.weatherGet,
+		Safe:    true,
+	})
+
 	logger.Info("工具注册完成", logger.Int("count", len(r.tools)))
 }
 
@@ -591,4 +614,17 @@ func (r *ToolRegistry) logService(ctx context.Context, params map[string]interfa
 		return "", err
 	}
 	return formatJournalEntries(entries), nil
+}
+
+func (r *ToolRegistry) weatherGet(ctx context.Context, params map[string]interface{}) (string, error) {
+	location := ""
+	if v, ok := params["location"].(string); ok {
+		location = v
+	}
+
+	weather, err := r.weather.GetWeatherSimple(ctx, location)
+	if err != nil {
+		return "", err
+	}
+	return weather, nil
 }
