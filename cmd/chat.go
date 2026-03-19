@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/npc1607/arch-linux-agent/internal/chat"
 	"github.com/npc1607/arch-linux-agent/internal/config"
@@ -70,10 +71,25 @@ func runChat(cmd *cobra.Command, args []string) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
-		<-sigChan
-		logger.Info("收到中断信号，正在退出...")
-		fmt.Fprintln(os.Stderr, "\n收到中断信号，正在退出...")
-		cancel()
+		count := 0
+		for range sigChan {
+			count++
+			if count == 1 {
+				logger.Info("收到中断信号，正在取消...")
+				fmt.Fprintln(os.Stderr, "\n收到中断信号，正在取消...")
+				cancel()
+				// 给一点时间让程序优雅退出
+				go func() {
+					time.Sleep(2 * time.Second)
+					logger.Warn("强制退出")
+					os.Exit(1)
+				}()
+			} else {
+				logger.Warn("强制退出")
+				fmt.Fprintln(os.Stderr, "\n强制退出...")
+				os.Exit(1)
+			}
+		}
 	}()
 
 	// Print welcome message
@@ -109,7 +125,7 @@ func runChat(cmd *cobra.Command, args []string) {
 			return
 		default:
 			// Print prompt
-			fmt.Print("🤖 You> ")
+			fmt.Print("👤 You> ")
 
 			// Read input
 			input, err := reader.ReadString('\n')
