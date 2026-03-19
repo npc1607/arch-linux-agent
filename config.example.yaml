@@ -1,0 +1,22 @@
+# OpenAI Configuration
+llm:
+  api_key: "your-api-key-here"
+  model: "gpt-4o"  # or gpt-4-turbo, gpt-3.5-turbo
+  base_url: "https://api.openai.com/v1"  # optional: custom endpoint
+
+# Security Settings
+security:
+  confirm_before_action: true
+  safe_mode: false  # read-only mode
+  max_execution_time: 300s
+
+# Logging
+logging:
+  level: "info"  # debug, info, warn, error
+  file: "~/.local/state/arch-agent/agent.log"
+
+# Command Paths
+commands:
+  pacman_cmd: "pacman"
+  yay_cmd: "yay"
+  sudo_cmd: "sudo"
