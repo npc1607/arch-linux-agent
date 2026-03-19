@@ -17,6 +17,7 @@ type Agent struct {
 	config     *config.Config
 	llmClient  *llm.Client
 	tools      *ToolRegistry
+	planner    *Planner
 	messages   []llm.Message
 }
 
@@ -31,106 +32,103 @@ func NewAgent(cfg *config.Config) (*Agent, error) {
 	// 创建工具注册表
 	tools := NewToolRegistry(cfg)
 
+	// 创建规划器
+	planner := NewPlanner(llmClient, tools)
+
 	return &Agent{
 		config:    cfg,
 		llmClient: llmClient,
 		tools:     tools,
+		planner:   planner,
 		messages:  make([]llm.Message, 0),
 	}, nil
 }
 
-// Process 处理用户输入
+// Process 处理用户输入（带规划）
 func (a *Agent) Process(ctx context.Context, userInput string, streamCallback func(string)) (string, error) {
 	logger.Info("Agent 处理用户输入",
 		logger.String("input", userInput),
 		logger.Int("history_len", len(a.messages)),
 	)
 
-	// 添加用户消息
+	// 1. 任务规划
+	plan, err := a.planner.Plan(ctx, userInput)
+	if err != nil {
+		return "", fmt.Errorf("任务规划失败: %w", err)
+	}
+
+	logger.Info("任务规划完成",
+		logger.String("intent", string(plan.Intent)),
+		logger.Int("steps", len(plan.Steps)),
+		logger.String("safety_level", plan.SafetyLevel),
+	)
+
+	// 2. 添加用户消息
 	a.messages = append(a.messages, llm.Message{
 		Role:    "user",
 		Content: userInput,
 	})
 
-	// 构建完整的消息列表（包含系统提示）
-	messages := a.buildMessages(userInput)
-
-	// 获取可用工具
-	llmTools := a.tools.GetOpenAITools()
-	llmFunctions := a.convertToolsToFunctions(llmTools)
-
-	var finalResponse string
-
-	if a.config.LLM.Temperature > 0 && streamCallback != nil {
-		// 流式处理
-		err := a.llmClient.ChatStream(ctx, a.convertMessagesToLLM(messages), llmFunctions, func(chunk string) {
-			streamCallback(chunk)
-			finalResponse += chunk
-		})
-
+	// 3. 执行计划
+	var results []string
+	for _, step := range plan.Steps {
+		result, err := a.planner.ExecuteStep(ctx, step)
 		if err != nil {
-			return "", err
+			// 执行失败，记录错误
+			errorMsg := fmt.Sprintf("步骤 %d (%s) 执行失败: %v", step.ID, step.Description, err)
+			logger.Error(errorMsg)
+			results = append(results, errorMsg)
+		} else {
+			results = append(results, result)
 		}
-
-		// 保存助手回复
-		a.messages = append(a.messages, llm.Message{
-			Role:    "assistant",
-			Content: finalResponse,
-		})
-
-		return finalResponse, nil
-	} else {
-		// 非流式处理
-		response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), llmFunctions)
-		if err != nil {
-			return "", err
-		}
-
-		// 处理工具调用
-		if len(response.ToolCalls) > 0 {
-			return a.handleToolCalls(ctx, response.ToolCalls, streamCallback)
-		}
-
-		finalResponse = response.Content
-
-		// 保存助手回复
-		a.messages = append(a.messages, llm.Message{
-			Role:    "assistant",
-			Content: finalResponse,
-		})
-
-		return finalResponse, nil
 	}
+
+	// 4. 构建响应
+	response := a.buildResponse(ctx, userInput, plan, results, streamCallback)
+
+	// 5. 保存助手回复
+	a.messages = append(a.messages, llm.Message{
+		Role:    "assistant",
+		Content: response,
+	})
+
+	return response, nil
 }
 
-// buildMessages 构建消息列表
-func (a *Agent) buildMessages(userInput string) []llm.Message {
-	// 构建系统提示
-	systemPrompt := llm.BuildDefaultSystemPrompt(a.config.Security.SafeMode)
-
-	// 添加工具描述
-	tools := a.tools.ListSafe()
-	if len(tools) > 0 {
-		systemPrompt += "\n\n可用工具：\n"
-		for _, tool := range tools {
-			systemPrompt += fmt.Sprintf("- %s: %s\n", tool.Name, tool.Description)
-		}
+// buildResponse 构建响应
+func (a *Agent) buildResponse(ctx context.Context, userInput string, plan *Plan, results []string, streamCallback func(string)) string {
+	// 如果只有一个步骤且是查询类，直接返回结果
+	if len(plan.Steps) == 1 && plan.Intent == IntentQuery {
+		return results[0]
 	}
+
+	// 多步骤或复杂任务，让 LLM 总结
+	prompt := fmt.Sprintf(`用户请求: %s
+
+执行计划:
+- 意图: %s
+- 步骤数: %d
+
+执行结果:
+%s
+
+请总结执行结果并给出建议。`, userInput, plan.Intent, len(plan.Steps), strings.Join(results, "\n\n"))
 
 	messages := []llm.Message{
-		{
-			Role:    "system",
-			Content: systemPrompt,
-		},
+		{Role: "system", Content: llm.BuildDefaultSystemPrompt(a.config.Security.SafeMode)},
+		{Role: "user", Content: prompt},
 	}
 
-	// 添加历史消息
-	messages = append(messages, a.messages...)
+	response, err := a.llmClient.Chat(ctx, messages, nil)
+	if err != nil {
+		// 如果 LLM 总结失败，返回原始结果
+		return strings.Join(results, "\n\n")
+	}
 
-	return messages
+	return response.Content
 }
 
-// handleToolCalls 处理工具调用
+// handleToolCalls 处理工具调用（保留用于未来可能的直接工具调用）
 func (a *Agent) handleToolCalls(ctx context.Context, toolCalls []llm.ToolCall, streamCallback func(string)) (string, error) {
 	logger.Info("处理工具调用", logger.Int("count", len(toolCalls)))
 
@@ -187,22 +185,9 @@ func (a *Agent) handleToolCalls(ctx context.Context, toolCalls []llm.ToolCall, s
 		toolResults = append(toolResults, result)
 	}
 
-	// 让 LLM 总结工具结果
-	messages := a.buildMessages("")
-	messages = append(messages, a.messages...)
-
-	response, err := a.llmClient.Chat(ctx, a.convertMessagesToLLM(messages), nil)
-	if err != nil {
-		return "", err
-	}
-
-	// 保存最终回复
-	a.messages = append(a.messages, llm.Message{
-		Role:    "assistant",
-		Content: response.Content,
-	})
-
-	return response.Content, nil
+	// 让 LLM 总结工具结果（使用简化的方式）
+	allResults := strings.Join(toolResults, "\n\n")
+	return allResults, nil
 }
 
 // convertMessagesToLLM 转换消息格式
