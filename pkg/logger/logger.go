@@ -202,6 +202,11 @@ func Bool(key string, val bool) zap.Field {
 	return zap.Bool(key, val)
 }
 
+// Strings 创建字符串数组字段
+func Strings(key string, val []string) zap.Field {
+	return zap.Strings(key, val)
+}
+
 // Now 获取当前时间（用于日志记录时间差）
 func Now() time.Time {
 	return time.Now()
