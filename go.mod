@@ -1,6 +1,6 @@
 module github.com/npc1607/arch-linux-agent
 
-go 1.25.3
+go 1.25.10
 
 require (
 	github.com/google/uuid v1.6.0
